@@ -21,7 +21,7 @@ fi
 
 # --- 2. Remove .claude* files and directories ---
 echo "🧹 Cleaning up .claude* files and directories from Home..."
-find "$HOME" -depth -name ".claude*" -exec rm -rf {} +
+sudo find "$HOME" -depth -name ".claude*" -exec rm -rf {} +
 
 # --- 3. Download and install Docker (if needed) ---
 if ! command -v docker &> /dev/null; then
