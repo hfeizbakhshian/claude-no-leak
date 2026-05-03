@@ -4,7 +4,7 @@ set -e
 # --- Variables ---
 PROXY_HOST="host.docker.internal"
 PROXY_PORT="10808"
-EXPECTED_COUNTRY="DE"
+EXPECTED_COUNTRY=${EXPECTED_COUNTRY:-DE}
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
 
 # --- 1. Check permissions (requires root) ---
