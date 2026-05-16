@@ -10,7 +10,6 @@ USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 # --- 1. Check permissions (requires root) ---
 if ! ip link add dummy0 type dummy >/dev/null 2>&1; then
     echo "❌ Error: Container was not run with '--cap-add=NET_ADMIN' permission."
-    ip link del dummy0 >/dev/null 2>&1 || true
     exit 1
 fi
 ip link del dummy0 >/dev/null 2>&1 || true
@@ -29,7 +28,7 @@ iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 iptables -A OUTPUT -d $PROXY_IP -p tcp --dport $PROXY_PORT -j ACCEPT
 iptables -P OUTPUT DROP
 
-# --- 3. Create proxychains config file (requires root) ---
+# --- 3. Create proxychains config file (for curl check) ---
 {
   echo "strict_chain"
   echo "proxy_dns"
@@ -37,8 +36,7 @@ iptables -P OUTPUT DROP
   echo "socks5  $PROXY_IP $PROXY_PORT"
 } > /etc/proxychains.conf
 
-# --- 4. Verify IP and DNS (run as root) ---
-# --- MODIFIED: Added -q flag to silence proxychains ---
+# --- 4. Verify IP and DNS ---
 JSON_RESPONSE=$(proxychains -q -f /etc/proxychains.conf curl -s -A "$USER_AGENT" --connect-timeout 10 "http://ip-api.com/json" || echo "fail")
 MY_IP=$(echo "$JSON_RESPONSE" | grep -o '"query":"[^"]*"' | cut -d '"' -f 4)
 COUNTRY_CODE=$(echo "$JSON_RESPONSE" | grep -o '"countryCode":"[^"]*"' | cut -d '"' -f 4)
@@ -51,21 +49,22 @@ if [ "$COUNTRY_CODE" != "$EXPECTED_COUNTRY" ]; then
     exit 1
 fi
 
-# --- 5. Setup user and drop privileges (Ubuntu Syntax - Silenced) ---
+# --- 5. Start Privoxy (SOCKS5 to HTTP Translator) ---
+echo "listen-address 127.0.0.1:8118" > /etc/privoxy/config
+# forward-socks5t ensures DNS requests are also tunneled securely
+echo "forward-socks5t / $PROXY_IP:$PROXY_PORT ." >> /etc/privoxy/config
+privoxy /etc/privoxy/config
+
+# --- 6. Setup user and drop privileges ---
 USER_ID=${HOST_UID:-1000}
 GROUP_ID=${HOST_GID:-1000}
 
-# Create group if it doesn't exist (redirect output to null)
 if ! getent group $GROUP_ID > /dev/null; then
     addgroup --gid $GROUP_ID claude-group >/dev/null 2>&1
 fi
-# Get the group name
 GROUP_NAME=$(getent group $GROUP_ID | cut -d: -f1)
 
-# Ensure the home directory exists
 mkdir -p /home/claude-user
-
-# Create user if not exists (redirect output to null)
 if ! getent passwd $USER_ID > /dev/null; then
     adduser \
         --uid $USER_ID \
@@ -78,15 +77,14 @@ if ! getent passwd $USER_ID > /dev/null; then
         claude-user >/dev/null 2>&1
 fi
 
-# Always ensure correct ownership of home dir and app dir
 chown $USER_ID:$GROUP_ID /home/claude-user
 chown $USER_ID:$GROUP_ID /app
 
-# --- 6. Unset proxy environment variables ---
-unset ALL_PROXY
-unset HTTPS_PROXY
-unset HTTP_PROXY
+# --- 7. Set HTTP_PROXY targeting the internal Privoxy ---
+export HTTP_PROXY="http://127.0.0.1:8118"
+export HTTPS_PROXY="http://127.0.0.1:8118"
+export http_proxy="http://127.0.0.1:8118"
+export https_proxy="http://127.0.0.1:8118"
 
-# --- 7. Execute main command (with proxychains and as new user) ---
-# -q flag was already here, which is correct
-exec gosu claude-user proxychains -q -f /etc/proxychains.conf "$@"
+# --- 8. Run main command (No proxychains needed for Claude anymore) ---
+exec gosu claude-user "$@"

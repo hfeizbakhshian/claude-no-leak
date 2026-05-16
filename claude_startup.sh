@@ -1,65 +1,26 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# Claude Docker Secure Environment Setup Script
-# This script will exit immediately if any command fails.
+# Claude Secure Docker Environment Setup Script
 # -----------------------------------------------------------------------------
 set -e
 
-# Variable to track if a reboot is needed
-REBOOT_NEEDED=0
+echo "🚀 Starting Claude secure Docker environment setup..."
 
-echo "🚀 Starting Claude secure environment setup..."
+# --- 1. Clean up previous installation ---
+echo "🧹 Cleaning up previous Claude installation (if any)..."
+rm -rf "$HOME/.claude/downloads/" 2>/dev/null || true
+rm -f "$HOME/.local/bin/claude" 2>/dev/null || true
 
-# --- 1. Remove previous npm version ---
-echo "🧹 Cleaning up previous @anthropic-ai/claude-code (if any)..."
-if command -v npm &> /dev/null; then
-    sudo npm uninstall -g @anthropic-ai/claude-code || true
-else
-    echo "   (npm not found, skipping this step.)"
-fi
-
-# --- 2. Remove .claude* files and directories ---
+# (Optional: Be careful with this as it deletes past conversations/configs)
 echo "🧹 Cleaning up .claude* files and directories from Home..."
-sudo find "$HOME" -depth -name ".claude*" -exec rm -rf {} +
+sudo find "$HOME" -maxdepth 1 -name ".claude*" -exec rm -rf {} +
 
-# --- 3. Download and install Docker (if needed) ---
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found. Downloading Docker install script..."
-    curl -fsSL https://get.docker.com -o install-docker.sh
-
-    echo "🛠️ Running Docker install script (requires sudo)..."
-    sudo sh ./install-docker.sh
-
-    echo "🗑️ Removing Docker install script..."
-    rm ./install-docker.sh
-    
-    echo "✅ Docker installed successfully."
-else
-    echo "✅ Docker is already installed. Skipping."
-fi
-
-# --- 4. Add current user to the docker group (if needed) ---
-if ! id -nG "$USER" | grep -qw "docker"; then
-    echo "👥 Adding user $USER to the docker group..."
-    sudo usermod -aG docker "$USER"
-    REBOOT_NEEDED=1 # Set flag for reboot
-else
-    echo "✅ User $USER is already in the docker group."
-fi
-
-# --- 5. Pull the Docker image ---
-echo "📥 Pulling image ghcr.io/hfeizbakhshian/claude-no-leak:latest..."
-# 'sudo' is necessary here because the current session
-# doesn't have permissions yet if the user was just added.
-sudo docker pull ghcr.io/hfeizbakhshian/claude-no-leak:latest
-
-# --- 6. Create .claude directory and default config ---
+# --- 2. Create default config ---
 echo "📁 Creating directory $HOME/.claude for persistence..."
 mkdir -p "$HOME/.claude"
 
 echo "✍️ Writing default config to $HOME/.claude.json..."
-# Use 'EOF' to prevent variable expansion
 cat <<'EOF' > "$HOME/.claude.json"
 {
  "numStartups": 0,
@@ -95,8 +56,20 @@ EOF
 
 touch "$HOME/.claude.json.backup"
 
-# --- 7. Create Executable Script (Replaces Alias) ---
+# --- 3. Build the Docker Image ---
+echo "🐳 Building Docker image (claude-secure)..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$SCRIPT_DIR/Dockerfile" || ! -f "$SCRIPT_DIR/entrypoint.sh" ]]; then
+    echo "❌ Error: Dockerfile or entrypoint.sh not found in $SCRIPT_DIR."
+    echo "Please run this script from the directory containing those files."
+    exit 1
+fi
 
+# Build image tagged as 'claude-secure'
+cd "$SCRIPT_DIR"
+docker build --build-arg HTTP_PROXY=http://172.17.0.1:10808 --build-arg HTTPS_PROXY=http://172.17.0.1:10808 -t claude-secure .
+
+# --- 4. Create wrapper script to run Docker ---
 BIN_DIR="$HOME/.local/bin"
 SCRIPT_PATH="$BIN_DIR/claude"
 
@@ -108,45 +81,36 @@ ALIAS_MARKER_START="# ALIAS_CLAUDE_START"
 ALIAS_MARKER_END="# ALIAS_CLAUDE_END"
 sed -i "/$ALIAS_MARKER_START/,/$ALIAS_MARKER_END/d" "$HOME/.bashrc"
 
-echo "✍️ Creating executable script at $SCRIPT_PATH..."
-# Use 'EOF' in quotes to prevent variable expansion *now*.
-# We want $PWD, $USER, etc. to be expanded when the 'claude' script is run.
-cat <<'EOF' > "$SCRIPT_PATH"
+echo "✍️ Creating executable Docker wrapper script at $SCRIPT_PATH..."
+cat <<'WRAPPER' > "$SCRIPT_PATH"
 #!/bin/bash
 set -e
 
-# Get the base name of the current directory
-CURRENT_DIR_NAME=$(basename "$PWD")
+# Run Claude inside the Docker container
+docker run -it --rm \
+    --cap-add=NET_ADMIN \
+    --add-host=host.docker.internal:host-gateway \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
+    -v "$PWD:/app" \
+    -v "$HOME/.claude:/home/claude-user/.claude" \
+    -v "$HOME/.claude.json:/home/claude-user/.claude.json" \
+    claude-secure "$@"
+WRAPPER
 
-docker run --rm -it \
-  --cap-add=NET_ADMIN \
-  --add-host=host.docker.internal:host-gateway \
-  -e HOST_UID=$(id -u) \
-  -e HOST_GID=$(id -g) \
-  -v "$PWD:/app/$CURRENT_DIR_NAME" \
-  -w "/app/$CURRENT_DIR_NAME" \
-  -v "$HOME/.claude:/home/claude-user/.claude" \
-  -v "$HOME/.claude.json:/home/claude-user/.claude.json" \
-  -v "$HOME/.claude.json.backup:/home/claude-user/.claude.json.backup" \
-  ghcr.io/hfeizbakhshian/claude-no-leak:latest "$@"
-EOF
-
-echo "🔒 Setting executable permissions for $SCRIPT_PATH..."
 chmod +x "$SCRIPT_PATH"
 
+# --- 5. Add to PATH ---
 echo "PATH check for $BIN_DIR..."
 PATH_MARKER_START="# LOCAL_BIN_PATH_START"
 PATH_MARKER_END="# LOCAL_BIN_PATH_END"
 PATH_ADD_BLOCK="export PATH=\"\$HOME/.local/bin:\$PATH\""
 
-# Check if the block already exists
 if ! grep -q "$PATH_MARKER_START" "$HOME/.bashrc"; then
     echo "   Adding $BIN_DIR to PATH in $HOME/.bashrc..."
-    # Add new block to the end of the file
     cat <<EOF >> "$HOME/.bashrc"
 
 $PATH_MARKER_START
-# Add .local/bin to PATH
 if [ -d "\$HOME/.local/bin" ] ; then
     $PATH_ADD_BLOCK
 fi
@@ -156,25 +120,8 @@ else
     echo "   $BIN_DIR PATH block already exists in .bashrc."
 fi
 
-echo "✅ Executable script created and PATH updated."
-
-# --- 8. Finalize, Self-Delete, and Reboot (if needed) ---
-if [ "$REBOOT_NEEDED" -eq 1 ]; then
-    echo "🎉 Installation successful."
-    echo "Your user was added to the docker group. The system must reboot for changes to take effect."
-    echo "🛑 System will reboot in 5 seconds... (Ctrl+C to cancel)"
-    sleep 5
-    
-    echo "🧹 Cleaning up setup script..."
-    rm -- "$0"
-    
-    sudo reboot
-else
-    echo "🎉 Setup successful."
-    echo "✅ No reboot needed."
-    echo "To apply PATH changes, please open a new terminal or run:"
-    echo "source ~/.bashrc"
-    
-    echo "🧹 Cleaning up setup script..."
-    rm -- "$0"
-fi
+# --- 6. Finalize ---
+echo "✅ Executable wrapper script created and PATH updated."
+echo "🎉 Setup successful."
+echo "To apply PATH changes, please open a new terminal or run:"
+echo "source ~/.bashrc"
