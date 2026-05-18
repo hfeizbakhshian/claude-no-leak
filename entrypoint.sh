@@ -78,7 +78,7 @@ if ! getent passwd $USER_ID > /dev/null; then
 fi
 
 chown $USER_ID:$GROUP_ID /home/claude-user
-chown $USER_ID:$GROUP_ID /app
+chown -R $USER_ID:$GROUP_ID /app
 
 # --- 7. Set HTTP_PROXY targeting the internal Privoxy ---
 export HTTP_PROXY="http://127.0.0.1:8118"
@@ -86,5 +86,13 @@ export HTTPS_PROXY="http://127.0.0.1:8118"
 export http_proxy="http://127.0.0.1:8118"
 export https_proxy="http://127.0.0.1:8118"
 
-# --- 8. Run main command (No proxychains needed for Claude anymore) ---
+# --- 8. Set working directory to /app/<host project name> if provided ---
+if [ -n "$HOST_PWD" ]; then
+    WORKDIR="/app/$(basename "$HOST_PWD")"
+    mkdir -p "$WORKDIR"
+    chown $USER_ID:$GROUP_ID "$WORKDIR"
+    cd "$WORKDIR"
+fi
+
+# --- 9. Run main command (No proxychains needed for Claude anymore) ---
 exec gosu claude-user "$@"
