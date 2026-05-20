@@ -122,7 +122,16 @@ else
     echo "   $BIN_DIR PATH block already exists in .bashrc."
 fi
 
-# --- 6. Finalize ---
+# --- 6. Copy CLAUDE.md into ~/.claude for persistence ---
+CLAUDE_MD_SRC="$SCRIPT_DIR/CLAUDE.md"
+if [[ -f "$CLAUDE_MD_SRC" ]]; then
+    echo "📋 Copying CLAUDE.md to $HOME/.claude/CLAUDE.md..."
+    cp "$CLAUDE_MD_SRC" "$HOME/.claude/CLAUDE.md"
+else
+    echo "⚠️  CLAUDE.md not found at $CLAUDE_MD_SRC — skipping copy."
+fi
+
+# --- 7. Finalize ---
 echo "✅ Executable wrapper script created and PATH updated."
 echo "🎉 Setup successful."
 echo "To apply PATH changes, please open a new terminal or run:"
