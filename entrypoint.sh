@@ -15,7 +15,8 @@ fi
 ip link del dummy0 >/dev/null 2>&1 || true
 
 # --- 2. Activate Kill Switch (requires root) ---
-PROXY_IP=$(getent hosts $PROXY_HOST | awk '{ print $1 }')
+PROXY_IP=$(getent ahostsv4 $PROXY_HOST 2>/dev/null | awk 'NR==1{print $1}')
+[ -z "$PROXY_IP" ] && PROXY_IP=$(getent hosts $PROXY_HOST | awk '{ print $1 }')
 if [ -z "$PROXY_IP" ]; then
     echo "❌ Error: Could not resolve IP for $PROXY_HOST."
     exit 1

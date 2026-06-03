@@ -7,21 +7,22 @@ set -e
 
 echo "🚀 Starting Claude secure Docker environment setup..."
 
-# --- 1. Clean up previous installation ---
-echo "🧹 Cleaning up previous Claude installation (if any)..."
-rm -rf "$HOME/.claude/downloads/" 2>/dev/null || true
-rm -f "$HOME/.local/bin/claude" 2>/dev/null || true
+# --- 1. Preserve existing Claude state ---
+# Intentionally do NOT remove $HOME/.claude, $HOME/.claude.json, or the
+# wrapper binary on re-runs — this script must be safe to re-run for image
+# updates without logging the user out or wiping conversation history.
 
-# (Optional: Be careful with this as it deletes past conversations/configs)
-echo "🧹 Cleaning up .claude* files and directories from Home..."
-sudo find "$HOME" -maxdepth 1 -name ".claude*" -exec rm -rf {} +
+# --- 2. Ensure config exists (idempotent — never overwrites) ---
+if [[ ! -d "$HOME/.claude" ]]; then
+    echo "📁 Creating $HOME/.claude (first-run only)..."
+    mkdir -p "$HOME/.claude"
+else
+    echo "✅ Preserving existing $HOME/.claude (login & history intact)."
+fi
 
-# --- 2. Create default config ---
-echo "📁 Creating directory $HOME/.claude for persistence..."
-mkdir -p "$HOME/.claude"
-
-echo "✍️ Writing default config to $HOME/.claude.json..."
-cat <<'EOF' > "$HOME/.claude.json"
+if [[ ! -f "$HOME/.claude.json" ]]; then
+    echo "✍️ Writing default config to $HOME/.claude.json (first-run only)..."
+    cat <<'EOF' > "$HOME/.claude.json"
 {
  "numStartups": 0,
  "theme": "dark",
@@ -53,8 +54,11 @@ cat <<'EOF' > "$HOME/.claude.json"
  "respectGitignore": true
 }
 EOF
+else
+    echo "✅ Preserving existing $HOME/.claude.json."
+fi
 
-touch "$HOME/.claude.json.backup"
+[[ -f "$HOME/.claude.json.backup" ]] || touch "$HOME/.claude.json.backup"
 
 # --- 3. Build the Docker Image ---
 echo "🐳 Building Docker image (claude-secure)..."
@@ -67,7 +71,7 @@ fi
 
 # Build image tagged as 'claude-secure'
 cd "$SCRIPT_DIR"
-docker build  --build-arg HTTP_PROXY=http://172.17.0.1:10808 --build-arg HTTPS_PROXY=http://172.17.0.1:10808 -t claude-secure .
+docker build --no-cache --build-arg HTTP_PROXY=http://172.17.0.1:10808 --build-arg HTTPS_PROXY=http://172.17.0.1:10808 -t ghcr.io/hfeizbakhshian/claude-no-leak:2.2.0 .
 
 # --- 4. Create wrapper script to run Docker ---
 BIN_DIR="$HOME/.local/bin"
@@ -97,7 +101,7 @@ docker run -it --rm \
     -v "$PWD:/app/$(basename "$PWD")" \
     -v "$HOME/.claude:/home/claude-user/.claude" \
     -v "$HOME/.claude.json:/home/claude-user/.claude.json" \
-    claude-secure "$@"
+    ghcr.io/hfeizbakhshian/claude-no-leak:latest "$@"
 WRAPPER
 
 chmod +x "$SCRIPT_PATH"
