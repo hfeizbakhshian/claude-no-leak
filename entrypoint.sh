@@ -4,7 +4,7 @@ set -e
 # --- Variables ---
 PROXY_HOST="host.docker.internal"
 PROXY_PORT="10808"
-EXPECTED_COUNTRY=${EXPECTED_COUNTRY:-DE}
+EXPECTED_COUNTRY=${EXPECTED_COUNTRY:-FI}
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
 
 # --- 1. Check permissions (requires root) ---
@@ -46,7 +46,7 @@ if [ -z "$MY_IP" ] || [ -z "$COUNTRY_CODE" ]; then
     exit 1
 fi
 if [ "$COUNTRY_CODE" != "$EXPECTED_COUNTRY" ]; then
-    echo "❌ Error: Your IP is not in Germany ($EXPECTED_COUNTRY). Current location: $COUNTRY_CODE."
+    echo "❌ Error: Your IP is not in Finland ($EXPECTED_COUNTRY). Current location: $COUNTRY_CODE."
     exit 1
 fi
 
