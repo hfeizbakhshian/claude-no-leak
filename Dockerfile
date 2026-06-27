@@ -21,8 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     privoxy \
     && rm -rf /var/lib/apt/lists/*
 
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
 # Install Claude (Updated for v2.1+)
-RUN curl -fsSL https://claude.ai/install.sh | bash && \
+RUN curl -x "$HTTPS_PROXY" -fsSL https://claude.ai/install.sh | bash && \
     cp -L /root/.local/bin/claude /usr/local/bin/claude && \
     chmod +x /usr/local/bin/claude && \
     rm -rf /root/.claude /root/.local
