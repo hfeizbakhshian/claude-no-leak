@@ -71,7 +71,7 @@ fi
 
 # Build image tagged as 'claude-secure'
 cd "$SCRIPT_DIR"
-docker build --build-arg HTTP_PROXY=http://172.17.0.1:10808 --build-arg HTTPS_PROXY=http://172.17.0.1:10808 -t ghcr.io/hfeizbakhshian/claude-no-leak:latest .
+docker build --no-cache --build-arg HTTP_PROXY=http://172.17.0.1:10808 --build-arg HTTPS_PROXY=http://172.17.0.1:10808 -t ghcr.io/hfeizbakhshian/claude-no-leak:latest .
 
 # --- 4. Create wrapper script to run Docker ---
 BIN_DIR="$HOME/.local/bin"
