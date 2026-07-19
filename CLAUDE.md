@@ -12,9 +12,14 @@ Claude Code runs inside a Docker container (Ubuntu 22.04). It has **no access to
 - `proxychains-ng`, `privoxy` — proxy tools
 - `gosu` — privilege helper
 - `ca-certificates`, `gnupg`, `tzdata` — base system utilities
+- `python3`, `python3-venv`, `python3-pip` — Python runtime, virtual environments, and pip
+
+## Python virtual environments
+- The project is mounted at the **same absolute path as on the host**, so venvs work identically inside and outside the container.
+- If `.venv/` exists in the project root, it is automatically on `PATH` (`python`/`pip` resolve to it). Otherwise create one with `python3 -m venv .venv`.
 
 ## What is NOT available
-No `java`, no `python`, no `node`, no `unzip`, no `gradle`, no `apt` (do not attempt to install packages).
+No `java`, no `node`, no `unzip`, no `gradle`, no `apt` (do not attempt to install packages).
 
 ## Persistence
 - `/app/<project-dir>` is volume-mounted to the host — **always write important files here**
@@ -34,6 +39,7 @@ No `java`, no `python`, no `node`, no `unzip`, no `gradle`, no `apt` (do not att
 
 ## Git
 - Only commit when the user explicitly asks.
+- Never include the `Claude-Session:` link in commit messages.
 - Never skip hooks (`--no-verify`) or force-push unless explicitly instructed.
 - Prefer new commits over amending existing ones.
 

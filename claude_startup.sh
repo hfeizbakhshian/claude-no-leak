@@ -97,7 +97,7 @@ docker run -it --rm \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     -e HOST_PWD="$PWD" \
-    -v "$PWD:/app/$(basename "$PWD")" \
+    -v "$PWD:$PWD" \
     -v "$HOME/.claude:/home/claude-user/.claude" \
     -v "$HOME/.claude.json:/home/claude-user/.claude.json" \
     ghcr.io/hfeizbakhshian/claude-no-leak:latest "$@"

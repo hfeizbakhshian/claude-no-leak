@@ -87,12 +87,15 @@ export HTTPS_PROXY="http://127.0.0.1:8118"
 export http_proxy="http://127.0.0.1:8118"
 export https_proxy="http://127.0.0.1:8118"
 
-# --- 8. Set working directory to /app/<host project name> if provided ---
+# --- 8. Set working directory to the host project path (mounted 1:1) ---
 if [ -n "$HOST_PWD" ]; then
-    WORKDIR="/app/$(basename "$HOST_PWD")"
-    mkdir -p "$WORKDIR"
-    chown $USER_ID:$GROUP_ID "$WORKDIR"
-    cd "$WORKDIR"
+    cd "$HOST_PWD"
+    # Project venvs contain absolute paths; the 1:1 mount keeps them valid.
+    # If one exists, put it on PATH so python/pip resolve to it automatically.
+    if [ -x "$HOST_PWD/.venv/bin/python" ]; then
+        export VIRTUAL_ENV="$HOST_PWD/.venv"
+        export PATH="$VIRTUAL_ENV/bin:$PATH"
+    fi
 fi
 
 # --- 9. Run main command (No proxychains needed for Claude anymore) ---
