@@ -123,6 +123,7 @@ set -euo pipefail
 SOCKS_HOST="${CLAUDE_SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${CLAUDE_SOCKS_PORT:-10808}"
 TIMEZONE="${CLAUDE_TIMEZONE:-Europe/Berlin}"
+EXPECTED_COUNTRY="${CLAUDE_EXPECTED_COUNTRY:-DE}"
 BRIDGE="${HOME}/.local/lib/claude-proxy-wrapper/socks_http_bridge.py"
 
 if [[ "$SOCKS_HOST" != "127.0.0.1" ]]; then
@@ -191,8 +192,23 @@ BRIDGE_PORT="$(<"$PORT_FILE")"
 [[ "$BRIDGE_PORT" =~ ^[0-9]+$ ]] || { echo "Error: proxy bridge did not become ready." >&2; exit 1; }
 PROXY_URL="http://127.0.0.1:${BRIDGE_PORT}"
 
-# Confirm the tunnel before Claude gets a chance to start. curl resolves the
-# hostname through SOCKS5 (socks5h), so this check cannot leak DNS.
+# Confirm the proxy leaves the network in the expected country before anything
+# else talks to Anthropic. Fail closed: an undetermined country stops Claude.
+# curl resolves every hostname through SOCKS5 (socks5h), so no check leaks DNS.
+exit_country="$(curl --silent --max-time 15 \
+    --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://ipinfo.io/country | tr -d '[:space:]')" || true
+if [[ ! "$exit_country" =~ ^[A-Z]{2}$ ]]; then
+    exit_country="$(curl --silent --max-time 15 \
+        --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.country.is/ |
+        sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([A-Z]\{2\}\)".*/\1/p')" || true
+fi
+if [[ "$exit_country" != "$EXPECTED_COUNTRY" ]]; then
+    echo "Error: the proxy exit IP is in '${exit_country:-unknown}', expected '${EXPECTED_COUNTRY}'." >&2
+    echo "Switch the SOCKS5 proxy to a ${EXPECTED_COUNTRY} endpoint, or set CLAUDE_EXPECTED_COUNTRY." >&2
+    exit 1
+fi
+
+# Confirm the tunnel reaches Anthropic before Claude gets a chance to start.
 curl --silent --show-error --max-time 15 \
     --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.anthropic.com/ >/dev/null || {
     echo "Error: Anthropic is unreachable through the SOCKS5 proxy." >&2
@@ -219,5 +235,5 @@ chmod 700 "$WRAPPER_PATH"
 
 echo "Installed native Claude wrapper: $WRAPPER_PATH"
 echo "Saved previous wrapper as: ${WRAPPER_PATH}.docker-backup"
-echo "SOCKS5 endpoint: 127.0.0.1:10808"
+echo "SOCKS5 endpoint: 127.0.0.1:10808 (exit IP must be in DE)"
 echo "Run: claude"
