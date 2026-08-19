@@ -1,20 +1,74 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs a native Claude Code wrapper with a per-process network kill switch.
-# Claude can only reach loopback; a local CONNECT bridge forwards HTTPS through
-# the SOCKS5 endpoint, using SOCKS5 remote DNS resolution.
+# Installs the native Claude Code release plus a wrapper with a per-process
+# network kill switch. Claude can only reach loopback; a local CONNECT bridge
+# forwards HTTPS through the SOCKS5 endpoint, using SOCKS5 remote DNS
+# resolution. Everything this script downloads goes through that same proxy.
+
+SOCKS_HOST="${CLAUDE_SOCKS_HOST:-127.0.0.1}"
+SOCKS_PORT="${CLAUDE_SOCKS_PORT:-10808}"
+PROXY_URL="socks5h://${SOCKS_HOST}:${SOCKS_PORT}"
 
 INSTALL_DIR="${HOME}/.local/lib/claude-proxy-wrapper"
 BIN_DIR="${HOME}/.local/bin"
+VERSIONS_DIR="${HOME}/.local/share/claude/versions"
 WRAPPER_PATH="${BIN_DIR}/claude"
 BRIDGE_PATH="${INSTALL_DIR}/socks_http_bridge.py"
+CLAUDE_MD_PATH="${HOME}/.claude/CLAUDE.md"
 
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+mkdir -p "$INSTALL_DIR" "$BIN_DIR" "${HOME}/.claude"
 
-if [[ -e "$WRAPPER_PATH" && ! -e "${WRAPPER_PATH}.docker-backup" ]]; then
+# Highest native release already installed, if any. Native builds are ELF
+# executables, so an old shell/Docker wrapper left in versions/ is ignored.
+find_native_claude() {
+    local version_name candidate
+    while IFS= read -r version_name; do
+        candidate="${VERSIONS_DIR}/${version_name}"
+        if [[ "$(od -An -tx1 -N4 "$candidate" 2>/dev/null | tr -d ' \n')" == "7f454c46" ]]; then
+            printf '%s' "$candidate"
+            return
+        fi
+    done < <(find "$VERSIONS_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort -Vr)
+}
+
+# Install the native release through the proxy. The official installer shells
+# out to curl, which honours these proxy variables, so no request bypasses the
+# tunnel and no hostname is resolved locally.
+if [[ -z "$(find_native_claude)" ]]; then
+    if ! (exec 3<>"/dev/tcp/${SOCKS_HOST}/${SOCKS_PORT}") 2>/dev/null; then
+        echo "Error: SOCKS5 proxy is not listening on ${SOCKS_HOST}:${SOCKS_PORT}." >&2
+        echo "Start the proxy first: the native release is downloaded through it." >&2
+        exit 1
+    fi
+    exec 3>&-
+
+    echo "No native Claude release found. Downloading it through ${PROXY_URL} ..."
+    installer="$(mktemp)"
+    curl --fail --silent --show-error --location --max-time 60 \
+        --proxy "$PROXY_URL" -o "$installer" https://claude.ai/install.sh || {
+        echo "Error: could not download the official installer through the proxy." >&2
+        rm -f "$installer"
+        exit 1
+    }
+    ALL_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" \
+        bash "$installer" stable || {
+        echo "Error: the native installer failed." >&2
+        echo "On HTTP 403 the exit IP of this proxy node is blocked by downloads.claude.ai;" >&2
+        echo "switch to another node and run this script again." >&2
+        rm -f "$installer"
+        exit 1
+    }
+    rm -f "$installer"
+fi
+
+# Only a real previous wrapper is worth keeping. The native installer leaves a
+# symlink into versions/ here, which must be removed rather than backed up:
+# writing through it would overwrite the release binary it points at.
+if [[ -f "$WRAPPER_PATH" && ! -L "$WRAPPER_PATH" && ! -e "${WRAPPER_PATH}.docker-backup" ]]; then
     cp -a "$WRAPPER_PATH" "${WRAPPER_PATH}.docker-backup"
 fi
+rm -f "$WRAPPER_PATH"
 
 cat > "$BRIDGE_PATH" <<'PYTHON'
 #!/usr/bin/env python3
@@ -155,9 +209,7 @@ if [[ -z "$REAL_CLAUDE" ]]; then
 fi
 [[ -x "$REAL_CLAUDE" ]] || {
     echo "Error: a native Claude executable was not found." >&2
-    echo "Install the official native release with:" >&2
-    echo "    curl -fsSL https://claude.ai/install.sh | bash" >&2
-    echo "then run claude_native_setup.sh again." >&2
+    echo "Run claude_native_setup.sh, which installs it through the proxy." >&2
     echo "You may also set CLAUDE_REAL_BINARY to its absolute path." >&2
     exit 1
 }
@@ -233,7 +285,46 @@ exit "$status"
 WRAPPER
 chmod 700 "$WRAPPER_PATH"
 
+if [[ -e "$CLAUDE_MD_PATH" && ! -e "${CLAUDE_MD_PATH}.backup" ]]; then
+    cp -a "$CLAUDE_MD_PATH" "${CLAUDE_MD_PATH}.backup"
+fi
+
+cat > "$CLAUDE_MD_PATH" <<'CLAUDE_MD'
+# Claude Code — Native Environment
+
+## Runtime
+Claude Code runs natively on this machine. There is no container and no image:
+the whole filesystem, every installed tool, and the user's own environment are
+directly available, and nothing written outside the project is ephemeral.
+
+## File and code edits
+- Always prefer editing existing files over creating new ones.
+- Never create `*.md` documentation files unless explicitly requested.
+- Do not add error handling, fallbacks, or validation for scenarios that can't happen.
+
+## Security
+- Never introduce command injection, XSS, SQL injection, or other OWASP Top 10 vulnerabilities.
+- Only validate at system boundaries (user input, external APIs).
+
+## Git
+- Only commit when the user explicitly asks.
+- Never include the `Claude-Session:` link in commit messages.
+- Never skip hooks (`--no-verify`) or force-push unless explicitly instructed.
+- Prefer new commits over amending existing ones.
+
+## Risky actions
+- Ask before deleting files, force-pushing, resetting hard, or affecting shared state.
+- Match scope of actions to what was actually requested.
+
+## Environment constraints
+- Ask before installing or removing system packages.
+- When shell commands are needed interactively (e.g. auth flows), suggest the user run `! <command>` in the prompt.
+CLAUDE_MD
+
+echo "Installed native Claude release: $(find_native_claude)"
+echo "Installed instructions: $CLAUDE_MD_PATH"
 echo "Installed native Claude wrapper: $WRAPPER_PATH"
-echo "Saved previous wrapper as: ${WRAPPER_PATH}.docker-backup"
+[[ -e "${WRAPPER_PATH}.docker-backup" ]] &&
+    echo "Saved previous wrapper as: ${WRAPPER_PATH}.docker-backup"
 echo "SOCKS5 endpoint: 127.0.0.1:10808 (exit IP must be in DE)"
 echo "Run: claude"
