@@ -10,6 +10,12 @@
     there rather than locally. Everything this script downloads takes the same
     route.
 
+    Names are the one gap: Windows resolves them in a shared system service, so
+    a lookup is not covered by a rule written against a single program. The
+    proxy variables keep Claude from resolving anything itself - it hands the
+    hostname to the proxy - but a child that ignores them can still put a name
+    on the wire, even though its connection is blocked.
+
     Run it from an elevated PowerShell: creating the firewall rule needs
     administrator rights.
 #>
@@ -118,6 +124,7 @@ $proxyHost = if ($env:CLAUDE_PROXY_HOST) { $env:CLAUDE_PROXY_HOST } else { '127.
 $proxyPort = if ($env:CLAUDE_PROXY_PORT) { [int]$env:CLAUDE_PROXY_PORT } else { 10808 }
 $expectedCountry = if ($env:CLAUDE_EXPECTED_COUNTRY) { $env:CLAUDE_EXPECTED_COUNTRY } else { 'DE' }
 $timezone = if ($env:CLAUDE_TIMEZONE) { $env:CLAUDE_TIMEZONE } else { 'Europe/Berlin' }
+$recheckSeconds = if ($env:CLAUDE_COUNTRY_RECHECK_SECONDS) { [int]$env:CLAUDE_COUNTRY_RECHECK_SECONDS } else { 120 }
 $firewallRuleName = 'Claude Code proxy kill switch'
 
 if ($proxyHost -ne '127.0.0.1') {
@@ -160,19 +167,26 @@ if ($blockedProgram -ne $realClaude) {
     exit 1
 }
 
-# Confirm the proxy leaves the network in the expected country before anything
-# else talks to Anthropic. Fail closed: an undetermined country stops Claude.
-$exitCountry = $null
-try {
-    $exitCountry = (Invoke-RestMethod -Proxy $proxyUrl -Uri 'https://ipinfo.io/country' -TimeoutSec 15).ToString().Trim()
-}
-catch { }
-if ($exitCountry -notmatch '^[A-Z]{2}$') {
+# Where the proxy leaves the network. Both lookups travel through the proxy, so
+# asking the question cannot expose the real address.
+function Get-ProxyExitCountry {
+    $country = $null
     try {
-        $exitCountry = (Invoke-RestMethod -Proxy $proxyUrl -Uri 'https://api.country.is/' -TimeoutSec 15).country
+        $country = (Invoke-RestMethod -Proxy $proxyUrl -Uri 'https://ipinfo.io/country' -TimeoutSec 15).ToString().Trim()
     }
     catch { }
+    if ($country -notmatch '^[A-Z]{2}$') {
+        try {
+            $country = (Invoke-RestMethod -Proxy $proxyUrl -Uri 'https://api.country.is/' -TimeoutSec 15).country
+        }
+        catch { }
+    }
+    return $country
 }
+
+# Fail closed before anything else talks to Anthropic: an undetermined country
+# stops Claude just as a wrong one does.
+$exitCountry = Get-ProxyExitCountry
 if ($exitCountry -ne $expectedCountry) {
     $seen = if ($exitCountry) { $exitCountry } else { 'unknown' }
     Write-Error "The proxy exit IP is in '$seen', expected '$expectedCountry'. Switch the proxy to a $expectedCountry endpoint, or set CLAUDE_EXPECTED_COUNTRY."
@@ -203,8 +217,24 @@ $env:http_proxy = $proxyUrl
 $env:https_proxy = $proxyUrl
 Remove-Item Env:ALL_PROXY, Env:all_proxy, Env:NO_PROXY, Env:no_proxy -ErrorAction SilentlyContinue
 
-& $realClaude @args
-exit $LASTEXITCODE
+# A check at startup only proves where the first packet went; exit nodes rotate
+# under a live session. Keep asking while Claude runs, and stop it the moment
+# the exit leaves the expected country. A lookup that fails to answer is not
+# treated as a move, only a valid and different country is.
+$startArguments = @{ FilePath = $realClaude; NoNewWindow = $true; PassThru = $true }
+if ($args.Count -gt 0) { $startArguments['ArgumentList'] = $args }
+$claude = Start-Process @startArguments
+
+while (-not $claude.WaitForExit($recheckSeconds * 1000)) {
+    $currentCountry = Get-ProxyExitCountry
+    if ($currentCountry -match '^[A-Z]{2}$' -and $currentCountry -ne $expectedCountry) {
+        Write-Warning "The proxy exit IP moved to '$currentCountry'. Stopping Claude."
+        Stop-Process -Id $claude.Id -Force
+        break
+    }
+}
+$claude.WaitForExit()
+exit $claude.ExitCode
 '@
 
 Set-Content -LiteralPath $wrapperCmd -Encoding ASCII -Value @'

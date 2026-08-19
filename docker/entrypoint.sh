@@ -22,12 +22,23 @@ if [ -z "$PROXY_IP" ]; then
     exit 1
 fi
 iptables -F OUTPUT
-iptables -A OUTPUT -o lo -j ACCEPT
+# Privoxy lives on 127.0.0.1. The rest of loopback carries Docker's embedded
+# resolver on 127.0.0.11, which forwards queries out of the container in the
+# clear, so it is rejected along with the port 53 rules that used to let any
+# lookup leave. Nothing here needs local DNS: privoxy reaches the proxy by
+# address and resolves names at the far end.
+iptables -A OUTPUT -o lo -d 127.0.0.1 -j ACCEPT
+iptables -A OUTPUT -o lo -j REJECT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 iptables -A OUTPUT -d $PROXY_IP -p tcp --dport $PROXY_PORT -j ACCEPT
 iptables -P OUTPUT DROP
+
+# Filtering v4 alone is worth nothing on a host that hands the container v6.
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -F OUTPUT 2>/dev/null || true
+    ip6tables -A OUTPUT -o lo -d ::1 -j ACCEPT 2>/dev/null || true
+    ip6tables -P OUTPUT DROP 2>/dev/null || true
+fi
 
 # --- 3. Create proxychains config file (for curl check) ---
 {
@@ -37,16 +48,23 @@ iptables -P OUTPUT DROP
   echo "socks5  $PROXY_IP $PROXY_PORT"
 } > /etc/proxychains.conf
 
-# --- 4. Verify IP and DNS ---
-JSON_RESPONSE=$(proxychains -q -f /etc/proxychains.conf curl -s -A "$USER_AGENT" --connect-timeout 10 "http://ip-api.com/json" || echo "fail")
-MY_IP=$(echo "$JSON_RESPONSE" | grep -o '"query":"[^"]*"' | cut -d '"' -f 4)
-COUNTRY_CODE=$(echo "$JSON_RESPONSE" | grep -o '"countryCode":"[^"]*"' | cut -d '"' -f 4)
-if [ -z "$MY_IP" ] || [ -z "$COUNTRY_CODE" ]; then
-    echo "❌ Error: Could not extract IP/Country from JSON response."
-    exit 1
-fi
+# --- 4. Verify where the proxy leaves the network ---
+# Over HTTPS: on plain HTTP anything along the path could answer with the
+# expected country and walk straight through this check.
+proxy_exit_country() {
+    country=$(proxychains -q -f /etc/proxychains.conf curl -s -A "$USER_AGENT" \
+        --connect-timeout 10 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]')
+    if ! echo "$country" | grep -qE '^[A-Z]{2}$'; then
+        country=$(proxychains -q -f /etc/proxychains.conf curl -s -A "$USER_AGENT" \
+            --connect-timeout 10 https://api.country.is/ 2>/dev/null |
+            sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([A-Z]\{2\}\)".*/\1/p')
+    fi
+    printf '%s' "$country"
+}
+
+COUNTRY_CODE=$(proxy_exit_country)
 if [ "$COUNTRY_CODE" != "$EXPECTED_COUNTRY" ]; then
-    echo "❌ Error: Your IP is not in Finland ($EXPECTED_COUNTRY). Current location: $COUNTRY_CODE."
+    echo "❌ Error: the proxy exit IP is in '${COUNTRY_CODE:-unknown}', expected '$EXPECTED_COUNTRY'."
     exit 1
 fi
 
@@ -98,5 +116,22 @@ if [ -n "$HOST_PWD" ]; then
     fi
 fi
 
-# --- 9. Run main command (No proxychains needed for Claude anymore) ---
+# --- 9. Keep watching where the exit lands ---
+# A check at startup only proves where the first packet went; nodes rotate
+# under a live session. A lookup that fails to answer is not treated as a move,
+# only a valid and different country is - and then everything is cut, including
+# the connections already open.
+(
+    while sleep "${COUNTRY_RECHECK_SECONDS:-120}"; do
+        CURRENT_COUNTRY=$(proxy_exit_country)
+        if echo "$CURRENT_COUNTRY" | grep -qE '^[A-Z]{2}$' && [ "$CURRENT_COUNTRY" != "$EXPECTED_COUNTRY" ]; then
+            echo "❌ Error: the proxy exit IP moved to '$CURRENT_COUNTRY'. Cutting the tunnel." >&2
+            iptables -I OUTPUT 1 -j REJECT
+            kill 1 2>/dev/null
+            exit 0
+        fi
+    done
+) &
+
+# --- 10. Run main command (No proxychains needed for Claude anymore) ---
 exec gosu claude-user "$@"

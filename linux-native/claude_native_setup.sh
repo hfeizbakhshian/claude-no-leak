@@ -5,6 +5,10 @@ set -euo pipefail
 # network kill switch. Claude can only reach loopback; a local CONNECT bridge
 # forwards HTTPS through the SOCKS5 endpoint, using SOCKS5 remote DNS
 # resolution. Everything this script downloads goes through that same proxy.
+#
+# Launching Claude needs sudo: the kernel only applies the IP filter when the
+# system manager installs it, and the wrapper proves the filter is live before
+# it hands over.
 
 SOCKS_HOST="${CLAUDE_SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${CLAUDE_SOCKS_PORT:-10808}"
@@ -178,6 +182,7 @@ SOCKS_HOST="${CLAUDE_SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${CLAUDE_SOCKS_PORT:-10808}"
 TIMEZONE="${CLAUDE_TIMEZONE:-Europe/Berlin}"
 EXPECTED_COUNTRY="${CLAUDE_EXPECTED_COUNTRY:-DE}"
+RECHECK_SECONDS="${CLAUDE_COUNTRY_RECHECK_SECONDS:-120}"
 BRIDGE="${HOME}/.local/lib/claude-proxy-wrapper/socks_http_bridge.py"
 
 if [[ "$SOCKS_HOST" != "127.0.0.1" ]]; then
@@ -185,7 +190,7 @@ if [[ "$SOCKS_HOST" != "127.0.0.1" ]]; then
     exit 1
 fi
 
-for command_name in python3 systemd-run curl; do
+for command_name in python3 systemd-run curl sudo; do
     command -v "$command_name" >/dev/null || {
         echo "Error: required command not found: $command_name" >&2
         exit 1
@@ -222,7 +227,9 @@ exec 3>&-
 
 PORT_FILE="$(mktemp)"
 BRIDGE_PID=""
+WATCHDOG_PID=""
 cleanup() {
+    [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
     rm -f "$PORT_FILE"
 }
@@ -244,16 +251,24 @@ BRIDGE_PORT="$(<"$PORT_FILE")"
 [[ "$BRIDGE_PORT" =~ ^[0-9]+$ ]] || { echo "Error: proxy bridge did not become ready." >&2; exit 1; }
 PROXY_URL="http://127.0.0.1:${BRIDGE_PORT}"
 
-# Confirm the proxy leaves the network in the expected country before anything
-# else talks to Anthropic. Fail closed: an undetermined country stops Claude.
-# curl resolves every hostname through SOCKS5 (socks5h), so no check leaks DNS.
-exit_country="$(curl --silent --max-time 15 \
-    --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://ipinfo.io/country | tr -d '[:space:]')" || true
-if [[ ! "$exit_country" =~ ^[A-Z]{2}$ ]]; then
-    exit_country="$(curl --silent --max-time 15 \
-        --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.country.is/ |
-        sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([A-Z]\{2\}\)".*/\1/p')" || true
-fi
+# Where the proxy leaves the network. Both lookups go through SOCKS5 with
+# remote name resolution, so asking the question cannot itself leak a DNS
+# query or expose the real address.
+proxy_exit_country() {
+    local country
+    country="$(curl --silent --max-time 15 \
+        --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://ipinfo.io/country | tr -d '[:space:]')" || true
+    if [[ ! "$country" =~ ^[A-Z]{2}$ ]]; then
+        country="$(curl --silent --max-time 15 \
+            --socks5-hostname "${SOCKS_HOST}:${SOCKS_PORT}" https://api.country.is/ |
+            sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([A-Z]\{2\}\)".*/\1/p')" || true
+    fi
+    printf '%s' "$country"
+}
+
+# Fail closed before anything else talks to Anthropic: an undetermined country
+# stops Claude just as a wrong one does.
+exit_country="$(proxy_exit_country)"
 if [[ "$exit_country" != "$EXPECTED_COUNTRY" ]]; then
     echo "Error: the proxy exit IP is in '${exit_country:-unknown}', expected '${EXPECTED_COUNTRY}'." >&2
     echo "Switch the SOCKS5 proxy to a ${EXPECTED_COUNTRY} endpoint, or set CLAUDE_EXPECTED_COUNTRY." >&2
@@ -272,13 +287,59 @@ export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
 export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
 unset ALL_PROXY all_proxy NO_PROXY no_proxy
 
-# The Claude process and every child it creates may connect only to loopback.
-# External connections therefore have exactly one route: bridge -> SOCKS5.
+# The jail. Claude and every child it spawns may address only the two loopback
+# hosts, so the single route out is bridge -> SOCKS5.
+#
+# It runs under the system manager on purpose: IP filtering is a BPF program
+# that only the system manager can install, and a "--user" scope accepts
+# IPAddressDeny= and then silently enforces nothing. sudo buys enforcement,
+# --uid/--gid hand the process straight back to the caller.
+#
+# 127.0.0.53 is deliberately outside the allow list: with the stub resolver
+# unreachable, a child that ignores the proxy variables cannot resolve a name
+# either, so no lookup reaches the local network.
+jail=(sudo systemd-run --scope --quiet --collect
+      -p IPAddressDeny=any
+      -p IPAddressAllow=127.0.0.1/32
+      -p IPAddressAllow=::1/128
+      --uid="$(id -u)" --gid="$(id -g)")
+
+# sudo clears the environment and "sudo -E" needs a sudoers tag that may not be
+# granted, so hand every variable over explicitly. The proxy variables and TZ
+# were exported above, so they travel with the rest.
+while IFS= read -r -d '' variable; do
+    jail+=(--setenv="$variable")
+done < <(env -0)
+
+# Never take the filter on trust: a scope that quietly ignored IPAddressDeny
+# would send every request straight out. A UDP write answers immediately -
+# refused outright while the filter is live, accepted the moment it is not -
+# and the address comes from the documentation range, so in the one case a
+# packet is emitted at all it dies at the first hop.
+if timeout 5 "${jail[@]}" bash -c 'exec 3<>/dev/udp/198.51.100.1/9 && printf x >&3' 2>/dev/null; then
+    echo "Error: the network jail is not being enforced - refusing to start Claude." >&2
+    echo "Every request would leave this machine directly, with your real address." >&2
+    exit 1
+fi
+
+# A check at startup only proves where the first packet went; exit nodes rotate
+# under a live session. Keep asking, and cut the tunnel the moment the exit
+# leaves the expected country. A lookup that fails to answer is not a move, so
+# only a valid and different country ends the session.
+(
+    while sleep "$RECHECK_SECONDS"; do
+        current_country="$(proxy_exit_country)"
+        if [[ "$current_country" =~ ^[A-Z]{2}$ && "$current_country" != "$EXPECTED_COUNTRY" ]]; then
+            echo "Error: the proxy exit IP moved to '${current_country}'. Cutting the tunnel." >&2
+            kill "$BRIDGE_PID" 2>/dev/null || true
+            exit 0
+        fi
+    done
+) &
+WATCHDOG_PID=$!
+
 set +e
-systemd-run --user --scope --quiet --collect \
-    -p IPAddressDeny=any \
-    -p IPAddressAllow=localhost \
-    "$REAL_CLAUDE" "$@"
+"${jail[@]}" "$REAL_CLAUDE" "$@"
 status=$?
 set -e
 exit "$status"
