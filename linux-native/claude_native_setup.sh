@@ -209,7 +209,7 @@ if [[ -z "$REAL_CLAUDE" ]]; then
 fi
 [[ -x "$REAL_CLAUDE" ]] || {
     echo "Error: a native Claude executable was not found." >&2
-    echo "Run claude_native_setup.sh, which installs it through the proxy." >&2
+    echo "Run linux-native/claude_native_setup.sh, which installs it through the proxy." >&2
     echo "You may also set CLAUDE_REAL_BINARY to its absolute path." >&2
     exit 1
 }
@@ -290,7 +290,7 @@ if [[ -e "$CLAUDE_MD_PATH" && ! -e "${CLAUDE_MD_PATH}.backup" ]]; then
 fi
 
 cat > "$CLAUDE_MD_PATH" <<'CLAUDE_MD'
-# Claude Code — Native Environment
+# Claude Code — Native Environment (Linux)
 
 ## Runtime
 Claude Code runs natively on this machine. There is no container and no image:

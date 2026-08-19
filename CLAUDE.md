@@ -1,29 +1,21 @@
-# Claude Code — Native Environment
+# claude-no-leak
 
-## Runtime
-Claude Code runs natively on this machine. There is no container and no image:
-the whole filesystem, every installed tool, and the user's own environment are
-directly available, and nothing written outside the project is ephemeral.
+Setup scenarios that run Claude Code with every outbound connection forced
+through a local proxy, so a request that ignores the proxy reaches nothing.
 
-## File and code edits
-- Always prefer editing existing files over creating new ones.
-- Never create `*.md` documentation files unless explicitly requested.
-- Do not add error handling, fallbacks, or validation for scenarios that can't happen.
+## Layout
+One directory per scenario, each self-contained:
 
-## Security
-- Never introduce command injection, XSS, SQL injection, or other OWASP Top 10 vulnerabilities.
-- Only validate at system boundaries (user input, external APIs).
+- `docker/` — Claude Code inside a container; kill switch via iptables, needs `--cap-add=NET_ADMIN`.
+- `linux-native/` — the native release on a Linux host; kill switch via a systemd scope that permits loopback only.
+- `windows-native/` — the native release on Windows; kill switch via an outbound Windows Firewall block on the release binary.
 
-## Git
-- Only commit when the user explicitly asks.
-- Never include the `Claude-Session:` link in commit messages.
-- Never skip hooks (`--no-verify`) or force-push unless explicitly instructed.
-- Prefer new commits over amending existing ones.
-
-## Risky actions
-- Ask before deleting files, force-pushing, resetting hard, or affecting shared state.
-- Match scope of actions to what was actually requested.
-
-## Environment constraints
-- Ask before installing or removing system packages.
-- When shell commands are needed interactively (e.g. auth flows), suggest the user run `! <command>` in the prompt.
+## Working in this repo
+- The `CLAUDE.md` inside each scenario directory is a **deliverable**, not
+  instructions for this repo: the setup script installs it on the target
+  machine as `~/.claude/CLAUDE.md`. It describes the environment Claude will
+  run in, so keep it self-contained.
+- Each setup script carries its own copy of that file inline. Change the two
+  copies together.
+- Scenarios share no files. Duplication between directories is deliberate —
+  each one has to work on a machine that has only that directory.
