@@ -97,6 +97,9 @@ docker run -it --rm \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     -e HOST_PWD="$PWD" \
+    -e CLAUDE_EXPECTED_COUNTRY \
+    -e CLAUDE_TIMEZONE \
+    -e CLAUDE_COUNTRY_RECHECK_SECONDS \
     -v "$PWD:$PWD" \
     -v "$HOME/.claude:/home/claude-user/.claude" \
     -v "$HOME/.claude.json:/home/claude-user/.claude.json" \

@@ -27,6 +27,7 @@ $ProgressPreference = 'SilentlyContinue'
 $proxyHost = if ($env:CLAUDE_PROXY_HOST) { $env:CLAUDE_PROXY_HOST } else { '127.0.0.1' }
 $proxyPort = if ($env:CLAUDE_PROXY_PORT) { [int]$env:CLAUDE_PROXY_PORT } else { 10808 }
 $proxyUrl = "http://${proxyHost}:${proxyPort}"
+$expectedCountry = if ($env:CLAUDE_EXPECTED_COUNTRY) { $env:CLAUDE_EXPECTED_COUNTRY } else { 'DE' }
 
 $wrapperDir = Join-Path $env:USERPROFILE '.claude-proxy-wrapper'
 $wrapperCmd = Join-Path $wrapperDir 'claude.cmd'
@@ -296,5 +297,5 @@ Write-Output "Installed native Claude release: $realClaude"
 Write-Output "Installed instructions: $claudeMdPath"
 Write-Output "Installed native Claude wrapper: $wrapperCmd"
 Write-Output "Kill switch: outbound firewall rule '$firewallRuleName'"
-Write-Output "Proxy endpoint: ${proxyHost}:${proxyPort} (exit IP must be in DE)"
+Write-Output "Proxy endpoint: ${proxyHost}:${proxyPort} (exit IP must be in $expectedCountry)"
 Write-Output "Run: claude"

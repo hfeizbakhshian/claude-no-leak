@@ -4,7 +4,16 @@ set -e
 # --- Variables ---
 PROXY_HOST="host.docker.internal"
 PROXY_PORT="10808"
-EXPECTED_COUNTRY=${EXPECTED_COUNTRY:-DE}
+# Same names as the native scenarios, so one setting reads the same everywhere.
+EXPECTED_COUNTRY=${CLAUDE_EXPECTED_COUNTRY:-DE}
+RECHECK_SECONDS=${CLAUDE_COUNTRY_RECHECK_SECONDS:-120}
+TIMEZONE=${CLAUDE_TIMEZONE:-Europe/Berlin}
+
+# The image carries a default timezone; honour the one asked for at run time so
+# the clock matches the country the proxy exits in without a rebuild.
+ln -snf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime 2>/dev/null || true
+echo "$TIMEZONE" > /etc/timezone 2>/dev/null || true
+export TZ="$TIMEZONE"
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
 
 # --- 1. Check permissions (requires root) ---
@@ -65,6 +74,7 @@ proxy_exit_country() {
 COUNTRY_CODE=$(proxy_exit_country)
 if [ "$COUNTRY_CODE" != "$EXPECTED_COUNTRY" ]; then
     echo "❌ Error: the proxy exit IP is in '${COUNTRY_CODE:-unknown}', expected '$EXPECTED_COUNTRY'."
+    echo "   Switch the proxy to a $EXPECTED_COUNTRY endpoint, or set CLAUDE_EXPECTED_COUNTRY."
     exit 1
 fi
 
@@ -122,7 +132,7 @@ fi
 # only a valid and different country is - and then everything is cut, including
 # the connections already open.
 (
-    while sleep "${COUNTRY_RECHECK_SECONDS:-120}"; do
+    while sleep "$RECHECK_SECONDS"; do
         CURRENT_COUNTRY=$(proxy_exit_country)
         if echo "$CURRENT_COUNTRY" | grep -qE '^[A-Z]{2}$' && [ "$CURRENT_COUNTRY" != "$EXPECTED_COUNTRY" ]; then
             echo "❌ Error: the proxy exit IP moved to '$CURRENT_COUNTRY'. Cutting the tunnel." >&2

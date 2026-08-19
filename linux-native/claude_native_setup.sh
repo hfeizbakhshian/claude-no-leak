@@ -387,5 +387,5 @@ echo "Installed instructions: $CLAUDE_MD_PATH"
 echo "Installed native Claude wrapper: $WRAPPER_PATH"
 [[ -e "${WRAPPER_PATH}.docker-backup" ]] &&
     echo "Saved previous wrapper as: ${WRAPPER_PATH}.docker-backup"
-echo "SOCKS5 endpoint: 127.0.0.1:10808 (exit IP must be in DE)"
+echo "SOCKS5 endpoint: ${SOCKS_HOST}:${SOCKS_PORT} (exit IP must be in ${CLAUDE_EXPECTED_COUNTRY:-DE})"
 echo "Run: claude"
