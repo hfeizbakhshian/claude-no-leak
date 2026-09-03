@@ -13,6 +13,7 @@ set -euo pipefail
 SOCKS_HOST="${CLAUDE_SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${CLAUDE_SOCKS_PORT:-10808}"
 PROXY_URL="socks5h://${SOCKS_HOST}:${SOCKS_PORT}"
+RELEASE_CHANNEL="${CLAUDE_RELEASE_CHANNEL:-latest}"
 
 INSTALL_DIR="${HOME}/.local/lib/claude-proxy-wrapper"
 BIN_DIR="${HOME}/.local/bin"
@@ -56,7 +57,7 @@ if [[ -z "$(find_native_claude)" ]]; then
         exit 1
     }
     ALL_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" \
-        bash "$installer" stable || {
+        bash "$installer" "$RELEASE_CHANNEL" || {
         echo "Error: the native installer failed." >&2
         echo "On HTTP 403 the exit IP of this proxy node is blocked by downloads.claude.ai;" >&2
         echo "switch to another node and run this script again." >&2
@@ -65,6 +66,55 @@ if [[ -z "$(find_native_claude)" ]]; then
     }
     rm -f "$installer"
 fi
+
+# --- network-jail helper -----------------------------------------------------
+# Launching the jail goes through sudo, and a password prompt on every start
+# would break scripted runs outright. A fixed helper is installed once, with a
+# sudoers rule scoped to exactly that file. The helper pins the jail
+# parameters and hands the process straight back to the invoking user, so the
+# rule grants nothing beyond starting something inside the jail: everything
+# before "--" must be a --setenv assignment, everything after it is the
+# command, and the uid always comes from whoever called sudo.
+JAIL_HELPER=/usr/local/bin/claude-jail
+SUDOERS_FILE=/etc/sudoers.d/claude-jail
+
+echo "Installing $JAIL_HELPER (may ask for your sudo password once)..."
+sudo tee "$JAIL_HELPER" >/dev/null <<'JAIL'
+#!/bin/bash
+set -euo pipefail
+
+# Only meaningful through the sudoers rule; SUDO_UID/GID identify the caller.
+[[ -n "${SUDO_UID:-}" && "$SUDO_UID" != "0" ]] || {
+    echo "claude-jail: must be invoked through sudo by a regular user" >&2
+    exit 1
+}
+
+# Everything before "--" must be an environment assignment for the caller's
+# own process; anything else here would be an option for systemd-run itself.
+setenv_args=()
+while [[ $# -gt 0 && "$1" == --setenv=* ]]; do
+    setenv_args+=("$1")
+    shift
+done
+[[ "${1:-}" == "--" ]] && shift
+
+exec systemd-run --scope --quiet --collect \
+    -p IPAddressDeny=any \
+    -p IPAddressAllow=127.0.0.1/32 \
+    -p IPAddressAllow=::1/128 \
+    --uid="$SUDO_UID" --gid="$SUDO_GID" \
+    ${setenv_args[@]+"${setenv_args[@]}"} \
+    -- "$@"
+JAIL
+sudo chmod 755 "$JAIL_HELPER"
+
+printf '%s ALL=(root) NOPASSWD: %s\n' "$(id -un)" "$JAIL_HELPER" | sudo tee "$SUDOERS_FILE" >/dev/null
+sudo chmod 440 "$SUDOERS_FILE"
+sudo visudo -cf "$SUDOERS_FILE" >/dev/null || {
+    sudo rm -f "$SUDOERS_FILE"
+    echo "Error: the generated sudoers rule failed validation and was removed." >&2
+    exit 1
+}
 
 # Only a real previous wrapper is worth keeping. The native installer leaves a
 # symlink into versions/ here, which must be removed rather than backed up:
@@ -292,24 +342,26 @@ unset ALL_PROXY all_proxy NO_PROXY no_proxy
 #
 # It runs under the system manager on purpose: IP filtering is a BPF program
 # that only the system manager can install, and a "--user" scope accepts
-# IPAddressDeny= and then silently enforces nothing. sudo buys enforcement,
-# --uid/--gid hand the process straight back to the caller.
+# IPAddressDeny= and then silently enforces nothing. The claude-jail helper
+# carries the parameters and a sudoers rule of its own, so enforcement does
+# not cost a password prompt on every launch.
 #
 # 127.0.0.53 is deliberately outside the allow list: with the stub resolver
 # unreachable, a child that ignores the proxy variables cannot resolve a name
 # either, so no lookup reaches the local network.
-jail=(sudo systemd-run --scope --quiet --collect
-      -p IPAddressDeny=any
-      -p IPAddressAllow=127.0.0.1/32
-      -p IPAddressAllow=::1/128
-      --uid="$(id -u)" --gid="$(id -g)")
+JAIL_HELPER=/usr/local/bin/claude-jail
+[[ -x "$JAIL_HELPER" ]] || {
+    echo "Error: $JAIL_HELPER is missing. Run linux-native/claude_native_setup.sh again." >&2
+    exit 1
+}
+jail=(sudo -n "$JAIL_HELPER")
 
-# sudo clears the environment and "sudo -E" needs a sudoers tag that may not be
-# granted, so hand every variable over explicitly. The proxy variables and TZ
-# were exported above, so they travel with the rest.
+# sudo clears the environment, so hand every variable over explicitly. The
+# proxy variables and TZ were exported above, so they travel with the rest.
 while IFS= read -r -d '' variable; do
     jail+=(--setenv="$variable")
 done < <(env -0)
+jail+=(--)
 
 # Never take the filter on trust: a scope that quietly ignored IPAddressDeny
 # would send every request straight out. A UDP write answers immediately -
